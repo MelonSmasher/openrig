@@ -9,6 +9,7 @@ import type { ActivityEvidence } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
+import { validateResumeToken } from "../domain/resume-token-validation.js";
 
 // ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
 // (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
@@ -115,7 +116,6 @@ activityRoutes.post("/hooks", async (c) => {
     // not the ephemeral session id. The persisted seat runtime is authoritative:
     // never allow a hook payload to cross-type another seat's resume token.
     if (resolved.runtime === "pi" || resolved.runtime === "omp") {
-      const { validateResumeToken } = await import("../domain/resume-token-validation.js");
       const sessionFile = stringOrNull(body.sessionFile);
       const validation = validateResumeToken(resolved.runtime, sessionFile);
       // OMP reports a path before its first turn is written. Persist only
@@ -144,11 +144,12 @@ activityRoutes.post("/hooks", async (c) => {
 
     // Id-shaped tokens also derive their type from persisted runtime metadata.
     // Unmapped runtimes skip persistence rather than guessing a type.
-    const { validateResumeToken } = await import("../domain/resume-token-validation.js");
+    // tokenPersisted reports the stored state, not format validity: a higher-provenance token
+    // (operator) refuses the hook write, which only counts as persisted when it already matches.
     const validation = validateResumeToken(resolved.runtime, sessionId);
-    if (validation.ok) {
-      sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook");
-    }
+    const tokenPersisted = validation.ok
+      && (sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+        || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
     eventBus.emit({
       type: "agent.session_identity",
       rigId: resolved.rigId,
@@ -159,7 +160,7 @@ activityRoutes.post("/hooks", async (c) => {
       provenance: "hook",
     });
 
-    return c.json({ ok: true, sessionId, provenance: "hook", tokenPersisted: validation.ok });
+    return c.json({ ok: true, sessionId, provenance: "hook", tokenPersisted });
   }
 
   // OPR.0.4.3.06 — startup proof ingestion. Mirrors session_identity: reuses
